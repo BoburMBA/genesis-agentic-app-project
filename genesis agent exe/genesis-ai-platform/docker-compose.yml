@@ -1,0 +1,140 @@
+version: '3.8'
+
+# ═══════════════════════════════════════════════════════════════
+# GENESIS AI Platform — Full Stack Docker Compose
+# Starts: PostgreSQL · Qdrant · Redis · (Neo4j optional) · Backend · Frontend
+# ═══════════════════════════════════════════════════════════════
+
+services:
+
+  # ── Vector Database (Episodic Memory) ──────────────────────
+  qdrant:
+    image: qdrant/qdrant:v1.12.0
+    container_name: genesis-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  # ── Cache + Working Memory (Redis) ─────────────────────────
+  redis:
+    image: redis:7.4-alpine
+    container_name: genesis-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── Metadata Database (PostgreSQL) ─────────────────────────
+  postgres:
+    image: postgres:17-alpine
+    container_name: genesis-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: genesis
+      POSTGRES_USER: genesis
+      POSTGRES_PASSWORD: genesis_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/alembic/init.sql:/docker-entrypoint-initdb.d/01_init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U genesis -d genesis"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  # ── Graph Database (Semantic Memory — optional) ─────────────
+  # Comment out neo4j if you don't need semantic memory to save RAM
+  neo4j:
+    image: neo4j:5.25-community
+    container_name: genesis-neo4j
+    restart: unless-stopped
+    ports:
+      - "7474:7474"   # Browser UI
+      - "7687:7687"   # Bolt
+    environment:
+      NEO4J_AUTH: neo4j/genesis_password
+      NEO4J_server_memory_heap_initial__size: 256m
+      NEO4J_server_memory_heap_max__size: 512m
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p genesis_password 'RETURN 1' || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    profiles:
+      - full  # Start with: docker-compose --profile full up
+
+  # ── FastAPI Backend ─────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: genesis-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://genesis:genesis_password@postgres:5432/genesis
+      QDRANT_URL: http://qdrant:6333
+      NEO4J_URL: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: genesis_password
+      REDIS_URL: redis://redis:6379
+      APP_ENV: development
+      CORS_ORIGINS: "http://localhost:3000,http://localhost:5173,http://localhost"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend/app:/app/app  # hot-reload in dev
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/api/v1/system/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  # ── React Frontend ──────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: genesis-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  qdrant_data:
+  redis_data:
+  postgres_data:
+  neo4j_data:
+
+networks:
+  default:
+    name: genesis-network

@@ -1,0 +1,25 @@
+version: '3.8'
+
+# Development overrides — use with:
+# docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+
+services:
+  backend:
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir /app/app
+    environment:
+      APP_ENV: development
+    volumes:
+      - ./backend/app:/app/app   # mount source for hot reload
+
+  frontend:
+    build:
+      context: ./frontend
+      target: builder             # stop at builder stage, don't nginx-serve
+    command: npm run dev
+    ports:
+      - "5173:5173"              # Vite dev server instead of port 3000
+    volumes:
+      - ./frontend/src:/app/src  # mount source for hot reload
+      - /app/node_modules        # keep node_modules in container
+    environment:
+      VITE_API_URL: http://localhost:8000
